@@ -33,20 +33,24 @@ M1024_DO_RATES = architectures["m1024"][1]
 # ==========================================#
 
 
-def _write_index_list_as_tsv(index_list, out_path):
+def _write_index_list_as_tsv_with_header_zero(index_list, out_path):
     """
-    Write a one-column index TSV that Scaden expects:
-    - Values are dummy (1s), real info is in the index.
-    - No header.
+    Write a TSV with:
+      - index = items (genes or cell types)
+      - single column named '0' filled with 1s
+    This matches Scaden's read path:
+        df = pd.read_table(..., index_col=0)
+        list(df['0'])
     """
     idx = [str(x) for x in index_list]
-    pd.Series([1] * len(idx), index=idx).to_csv(out_path, sep="\t", header=False)
+    s = pd.Series([1] * len(idx), index=idx, name="0")
+    s.to_csv(out_path, sep="\t", header=True)
 
 
 def _ensure_genes_file(model_dir: str, data_path: str):
     """
     Ensure <model_dir>/genes.txt exists.
-    Writes genes.txt with genes as the *index* column (no header).
+    Writes genes.txt with genes as index and a header column named '0'.
     """
     genes_path = os.path.join(model_dir, "genes.txt")
     if os.path.isfile(genes_path):
@@ -62,16 +66,15 @@ def _ensure_genes_file(model_dir: str, data_path: str):
     genes = list(map(str, adata.var_names.tolist()))
     if not genes:
         raise RuntimeError("No genes found in adata.var_names; cannot write genes.txt.")
-    _write_index_list_as_tsv(genes, genes_path)
+    _write_index_list_as_tsv_with_header_zero(genes, genes_path)
     logger.warning(f"Wrote genes.txt to {model_dir}")
 
 
 def _ensure_celltypes_file(model_dir: str, data_path: str):
     """
     Ensure <model_dir>/celltypes.txt exists.
-    STRICT source: adata.uns['cell_types'] must be present and non-empty.
-    Accepts list/tuple/NumPy array/pandas Index.
-    Writes a TSV with cell types as the *index* column (no header).
+    Source: adata.uns['cell_types'] (accepts list/tuple/np.ndarray/Index).
+    Writes a TSV with cell types as index and a header column named '0'.
     """
     path = os.path.join(model_dir, "celltypes.txt")
     if os.path.isfile(path):
@@ -85,33 +88,21 @@ def _ensure_celltypes_file(model_dir: str, data_path: str):
 
     adata = read_h5ad(data_path)
     labels = adata.uns.get("cell_types")
-
-    # Accept numpy arrays or similar sequence-like containers
     if labels is None:
         raise RuntimeError(
             "processed.h5ad must contain uns['cell_types'] as a non-empty sequence "
             "to generate celltypes.txt."
         )
 
-    try:
-        # Prefer robust conversion if available (e.g., numpy array)
-        if hasattr(labels, "tolist"):
-            labels_list = labels.tolist()
-        else:
-            labels_list = list(labels)
-    except Exception:
-        raise RuntimeError(
-            "uns['cell_types'] could not be interpreted as a sequence. "
-            "Ensure it is a list-like object."
-        )
-
+    # Robust conversion (handles numpy arrays, pandas Index, etc.)
+    labels_list = labels.tolist() if hasattr(labels, "tolist") else list(labels)
     if not labels_list:
         raise RuntimeError(
             "processed.h5ad must contain uns['cell_types'] as a non-empty sequence "
             "to generate celltypes.txt."
         )
 
-    _write_index_list_as_tsv([str(x) for x in labels_list], path)
+    _write_index_list_as_tsv_with_header_zero([str(x) for x in labels_list], path)
     logger.warning(f"Wrote celltypes.txt (from .uns['cell_types']) to {model_dir}")
 
 
