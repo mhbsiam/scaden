@@ -9,6 +9,7 @@ Contains code to
 
 # Imports
 import os
+import shutil
 import logging
 import tensorflow as tf
 from anndata import read_h5ad
@@ -33,20 +34,84 @@ M1024_DO_RATES = architectures["m1024"][1]
 # ==========================================#
 
 
-def _resolve_model_path(root_dir: str, subdir: str) -> str:
+def _has_savedmodel(dir_path: str) -> bool:
+    """Check if a TensorFlow SavedModel exists at dir_path."""
+    return (
+        os.path.isfile(os.path.join(dir_path, "saved_model.pb"))
+        and os.path.isdir(os.path.join(dir_path, "variables"))
+    )
+
+
+def _prepare_savedmodel_dir(root_dir: str, subdir: str) -> str:
     """
-    Prefer a concrete model file ('.keras' or '.h5') inside <root_dir>/<subdir>.
-    Fall back to the directory itself (for SavedModel or legacy layouts).
+    Ensure that <root_dir>/<subdir> can be consumed by Scaden.predict(), which expects:
+      - a TF SavedModel directory at the provided path, and
+      - a 'genes.txt' file in the same directory.
+
+    If we only have a '.keras' or '.h5' file (from Keras 3 saving),
+    we will:
+      1) load that file,
+      2) export a SavedModel into <root_dir>/<subdir>/_export,
+      3) copy 'genes.txt' from <root_dir>/<subdir> into the _export dir.
+
+    Returns the directory that Scaden should use as model_dir (either the original subdir
+    if it already contains a SavedModel, or the new _export directory).
     """
     base = os.path.join(root_dir, subdir)
+    export_dir = os.path.join(base, "_export")
+    genes_src = os.path.join(base, "genes.txt")
+
+    # Case 1: Already a SavedModel in the base directory
+    if _has_savedmodel(base):
+        # Ensure genes.txt exists here; warn if missing
+        if not os.path.isfile(genes_src):
+            logger.warning(f"Expected genes.txt not found in {base}.")
+        logger.info(f"Using existing SavedModel directory: {base}")
+        return base
+
+    # Case 2: We need to export a SavedModel from a file
+    model_file = None
     for fname in ("model.keras", "model.h5"):
-        fpath = os.path.join(base, fname)
-        if os.path.isfile(fpath):
-            logger.info(f"Using model file: {fpath}")
-            return fpath
-    # SavedModel or legacy: let loader handle the directory
-    logger.info(f"Using model directory: {base}")
-    return base
+        candidate = os.path.join(base, fname)
+        if os.path.isfile(candidate):
+            model_file = candidate
+            break
+
+    if model_file is None:
+        # Nothing we can do; fall back to base (Scaden may error with load)
+        logger.warning(
+            f"No SavedModel or model file (.keras/.h5) found in {base}. "
+            f"Scaden may fail to load the model."
+        )
+        return base
+
+    # Export only if we haven't exported already
+    if not _has_savedmodel(export_dir):
+        os.makedirs(export_dir, exist_ok=True)
+        logger.info(f"Loading model file for export: {model_file}")
+        model = tf.keras.models.load_model(model_file)
+        # Export to SavedModel format (Keras 3 API)
+        logger.info(f"Exporting SavedModel to: {export_dir}")
+        # If export_dir contains old contents, clear them to avoid conflicts
+        for item in os.listdir(export_dir):
+            item_path = os.path.join(export_dir, item)
+            if os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)
+        model.export(export_dir)
+
+    # Ensure genes.txt is available alongside the SavedModel
+    if os.path.isfile(genes_src):
+        genes_dst = os.path.join(export_dir, "genes.txt")
+        if not os.path.isfile(genes_dst):
+            shutil.copy2(genes_src, genes_dst)
+            logger.info(f"Copied genes.txt to: {genes_dst}")
+    else:
+        logger.warning(f"Expected genes.txt not found in {base}.")
+
+    logger.info(f"Using exported SavedModel directory: {export_dir}")
+    return export_dir
 
 
 def prediction(model_dir, data_path, out_name, seed=0):
@@ -58,9 +123,14 @@ def prediction(model_dir, data_path, out_name, seed=0):
     :return:
     """
 
+    # Prepare model directories that Scaden can consume
+    m256_dir = _prepare_savedmodel_dir(model_dir, "m256")
+    m512_dir = _prepare_savedmodel_dir(model_dir, "m512")
+    m1024_dir = _prepare_savedmodel_dir(model_dir, "m1024")
+
     # Small model predictions
     cdn256 = Scaden(
-        model_dir=_resolve_model_path(model_dir, "m256"),
+        model_dir=m256_dir,
         model_name="m256",
         seed=seed,
         hidden_units=M256_HIDDEN_UNITS,
@@ -70,7 +140,7 @@ def prediction(model_dir, data_path, out_name, seed=0):
 
     # Mid model predictions
     cdn512 = Scaden(
-        model_dir=_resolve_model_path(model_dir, "m512"),
+        model_dir=m512_dir,
         model_name="m512",
         seed=seed,
         hidden_units=M512_HIDDEN_UNITS,
@@ -80,7 +150,7 @@ def prediction(model_dir, data_path, out_name, seed=0):
 
     # Large model predictions
     cdn1024 = Scaden(
-        model_dir=_resolve_model_path(model_dir, "m1024"),
+        model_dir=m1024_dir,
         model_name="m1024",
         seed=seed,
         hidden_units=M1024_HIDDEN_UNITS,
