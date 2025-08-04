@@ -10,6 +10,8 @@ Contains code to
 # Imports
 import os
 import logging
+import pandas as pd
+from anndata import read_h5ad
 from scaden.model.architectures import architectures
 from scaden.model.scaden import Scaden
 
@@ -31,22 +33,52 @@ M1024_DO_RATES = architectures["m1024"][1]
 # ==========================================#
 
 
+def _ensure_genes_file(model_dir: str, data_path: str):
+    """
+    Ensure <model_dir>/genes.txt exists. If absent and the training data is an .h5ad file,
+    write genes.txt using adata.var_names from the training matrix.
+    """
+    genes_path = os.path.join(model_dir, "genes.txt")
+    if os.path.isfile(genes_path):
+        return  # nothing to do
+
+    try:
+        if isinstance(data_path, str) and data_path.lower().endswith(".h5ad") and os.path.isfile(data_path):
+            adata = read_h5ad(data_path)
+            pd.Series(adata.var_names).to_csv(genes_path, sep="\t")
+            logger.warning(f"Wrote genes.txt to {model_dir}")
+        else:
+            logger.warning(
+                f"genes.txt missing and training data not an .h5ad file (or not found): {data_path}. "
+                f"Could not auto-generate genes.txt."
+            )
+    except Exception as ge:
+        logger.warning(f"Could not write genes.txt to {model_dir}: {ge}")
+
+
 def _train_with_keras3_fix(cdn: Scaden, data_path, train_datasets):
     """
-    Run cdn.train(); if Keras 3 rejects saving to a bare directory
-    ('Invalid filepath extension for saving'), save a `.keras` file
-    inside that directory instead.
+    Run cdn.train(); if Keras 3 refuses to save to a bare directory
+    ('Invalid filepath extension for saving'), save a `.keras` file inside the directory
+    and also ensure that genes.txt exists there.
     """
     try:
         cdn.train(input_path=data_path, train_datasets=train_datasets)
+        # If Scaden's internal save finished normally, genes.txt should already exist.
+        # As a safety net, ensure it's there.
+        _ensure_genes_file(cdn.model_dir, data_path)
     except ValueError as e:
-        if "Invalid filepath extension for saving" in str(e):
-            model_dir = cdn.model_dir  # e.g., heart_model/m256
+        msg = str(e)
+        if "Invalid filepath extension for saving" in msg:
+            # Keras 3: model.save() requires .keras/.h5; save explicitly
+            model_dir = cdn.model_dir
             os.makedirs(model_dir, exist_ok=True)
             outfile = os.path.join(model_dir, "model.keras")
-            # Training completed; only the save step failed. Save explicitly:
             cdn.model.save(outfile)
-            logger.warning(f"Keras 3 workaround: saved model to {outfile}")
+            logger.warning(f"Scaden model saved to {outfile}")
+
+            # Make sure genes.txt exists (derived from training data)
+            _ensure_genes_file(model_dir, data_path)
         else:
             raise
 
@@ -55,7 +87,7 @@ def training(
     data_path, train_datasets, model_dir, batch_size, learning_rate, num_steps, seed=0
 ):
     """
-    Perform training of a Scaden model ensemble consisting of three different models
+    Perform training of three a scaden model ensemble consisting of three different models
     :param model_dir:
     :param batch_size:
     :param learning_rate:
