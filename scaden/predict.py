@@ -50,7 +50,7 @@ def _prepare_savedmodel_dir(root_dir: str, subdir: str) -> str:
 
     If we only have a '.keras' or '.h5' file (from Keras 3 saving),
     we will:
-      1) load that file,
+      1) load that file with a custom mapping for 'softmax_v2',
       2) export a SavedModel into <root_dir>/<subdir>/_export,
       3) copy 'genes.txt' from <root_dir>/<subdir> into the _export dir.
 
@@ -63,13 +63,12 @@ def _prepare_savedmodel_dir(root_dir: str, subdir: str) -> str:
 
     # Case 1: Already a SavedModel in the base directory
     if _has_savedmodel(base):
-        # Ensure genes.txt exists here; warn if missing
         if not os.path.isfile(genes_src):
             logger.warning(f"Expected genes.txt not found in {base}.")
         logger.info(f"Using existing SavedModel directory: {base}")
         return base
 
-    # Case 2: We need to export a SavedModel from a file
+    # Case 2: Need to export a SavedModel from a file
     model_file = None
     for fname in ("model.keras", "model.h5"):
         candidate = os.path.join(base, fname)
@@ -78,21 +77,25 @@ def _prepare_savedmodel_dir(root_dir: str, subdir: str) -> str:
             break
 
     if model_file is None:
-        # Nothing we can do; fall back to base (Scaden may error with load)
         logger.warning(
             f"No SavedModel or model file (.keras/.h5) found in {base}. "
             f"Scaden may fail to load the model."
         )
         return base
 
-    # Export only if we haven't exported already
+    # Export only if not already exported
     if not _has_savedmodel(export_dir):
         os.makedirs(export_dir, exist_ok=True)
         logger.info(f"Loading model file for export: {model_file}")
-        model = tf.keras.models.load_model(model_file)
-        # Export to SavedModel format (Keras 3 API)
+
+        # --- IMPORTANT FIX: map 'softmax_v2' to a valid Keras 3 activation ---
+        custom_objects = {"softmax_v2": tf.keras.activations.softmax}
+        model = tf.keras.models.load_model(
+            model_file, custom_objects=custom_objects, compile=False
+        )
+
         logger.info(f"Exporting SavedModel to: {export_dir}")
-        # If export_dir contains old contents, clear them to avoid conflicts
+        # Clear any previous contents in export_dir
         for item in os.listdir(export_dir):
             item_path = os.path.join(export_dir, item)
             if os.path.isdir(item_path):
