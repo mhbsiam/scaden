@@ -69,7 +69,8 @@ def _ensure_genes_file(model_dir: str, data_path: str):
 def _ensure_celltypes_file(model_dir: str, data_path: str):
     """
     Ensure <model_dir>/celltypes.txt exists.
-    STRICT version: requires adata.uns['cell_types'] to be present and non-empty.
+    STRICT source: adata.uns['cell_types'] must be present and non-empty.
+    Accepts list/tuple/NumPy array/pandas Index.
     Writes a TSV with cell types as the *index* column (no header).
     """
     path = os.path.join(model_dir, "celltypes.txt")
@@ -84,13 +85,33 @@ def _ensure_celltypes_file(model_dir: str, data_path: str):
 
     adata = read_h5ad(data_path)
     labels = adata.uns.get("cell_types")
-    if not isinstance(labels, (list, tuple)) or len(labels) == 0:
+
+    # Accept numpy arrays or similar sequence-like containers
+    if labels is None:
         raise RuntimeError(
-            "processed.h5ad must contain uns['cell_types'] as a non-empty list "
+            "processed.h5ad must contain uns['cell_types'] as a non-empty sequence "
             "to generate celltypes.txt."
         )
 
-    _write_index_list_as_tsv([str(x) for x in labels], path)
+    try:
+        # Prefer robust conversion if available (e.g., numpy array)
+        if hasattr(labels, "tolist"):
+            labels_list = labels.tolist()
+        else:
+            labels_list = list(labels)
+    except Exception:
+        raise RuntimeError(
+            "uns['cell_types'] could not be interpreted as a sequence. "
+            "Ensure it is a list-like object."
+        )
+
+    if not labels_list:
+        raise RuntimeError(
+            "processed.h5ad must contain uns['cell_types'] as a non-empty sequence "
+            "to generate celltypes.txt."
+        )
+
+    _write_index_list_as_tsv([str(x) for x in labels_list], path)
     logger.warning(f"Wrote celltypes.txt (from .uns['cell_types']) to {model_dir}")
 
 
