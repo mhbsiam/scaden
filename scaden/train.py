@@ -5,14 +5,13 @@ Contains code to
 - process a training datasets
 - train a model
 - perform predictions
-
 """
 
 # Imports
+import os
 import logging
 from scaden.model.architectures import architectures
 from scaden.model.scaden import Scaden
-
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +31,31 @@ M1024_DO_RATES = architectures["m1024"][1]
 # ==========================================#
 
 
+def _train_with_keras3_fix(cdn: Scaden, data_path, train_datasets):
+    """
+    Run cdn.train(); if Keras 3 rejects saving to a bare directory
+    ('Invalid filepath extension for saving'), save a `.keras` file
+    inside that directory instead.
+    """
+    try:
+        cdn.train(input_path=data_path, train_datasets=train_datasets)
+    except ValueError as e:
+        if "Invalid filepath extension for saving" in str(e):
+            model_dir = cdn.model_dir  # e.g., heart_model/m256
+            os.makedirs(model_dir, exist_ok=True)
+            outfile = os.path.join(model_dir, "model.keras")
+            # Training completed; only the save step failed. Save explicitly:
+            cdn.model.save(outfile)
+            logger.warning(f"Keras 3 workaround: saved model to {outfile}")
+        else:
+            raise
+
+
 def training(
     data_path, train_datasets, model_dir, batch_size, learning_rate, num_steps, seed=0
 ):
     """
-    Perform training of three a scaden model ensemble consisting of three different models
+    Perform training of a Scaden model ensemble consisting of three different models
     :param model_dir:
     :param batch_size:
     :param learning_rate:
@@ -62,7 +81,7 @@ def training(
         hidden_units=M256_HIDDEN_UNITS,
         do_rates=M256_DO_RATES,
     )
-    cdn256.train(input_path=data_path, train_datasets=train_datasets)
+    _train_with_keras3_fix(cdn256, data_path, train_datasets)
     del cdn256
 
     # Training of M512 model
@@ -77,7 +96,7 @@ def training(
         hidden_units=M512_HIDDEN_UNITS,
         do_rates=M512_DO_RATES,
     )
-    cdn512.train(input_path=data_path, train_datasets=train_datasets)
+    _train_with_keras3_fix(cdn512, data_path, train_datasets)
     del cdn512
 
     # Training of M1024 model
@@ -92,7 +111,7 @@ def training(
         hidden_units=M1024_HIDDEN_UNITS,
         do_rates=M1024_DO_RATES,
     )
-    cdn1024.train(input_path=data_path, train_datasets=train_datasets)
+    _train_with_keras3_fix(cdn1024, data_path, train_datasets)
     del cdn1024
 
     logger.info("[green]Training finished.")
