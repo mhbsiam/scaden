@@ -33,40 +33,84 @@ M1024_DO_RATES = architectures["m1024"][1]
 # ==========================================#
 
 
+def _write_index_list_as_tsv(index_list, out_path):
+    """
+    Write a one-column index TSV that Scaden expects:
+    - Values are dummy (1s), real info is in the index.
+    - No header.
+    """
+    idx = [str(x) for x in index_list]
+    pd.Series([1] * len(idx), index=idx).to_csv(out_path, sep="\t", header=False)
+
+
 def _ensure_genes_file(model_dir: str, data_path: str):
     """
-    Ensure <model_dir>/genes.txt exists. If absent and the training data is an .h5ad file,
-    write genes.txt using adata.var_names from the training matrix.
+    Ensure <model_dir>/genes.txt exists.
+    Writes genes.txt with genes as the *index* column (no header).
     """
     genes_path = os.path.join(model_dir, "genes.txt")
     if os.path.isfile(genes_path):
-        return  # nothing to do
+        return
 
-    try:
-        if isinstance(data_path, str) and data_path.lower().endswith(".h5ad") and os.path.isfile(data_path):
-            adata = read_h5ad(data_path)
-            pd.Series(adata.var_names).to_csv(genes_path, sep="\t")
-            logger.warning(f"Wrote genes.txt to {model_dir}")
-        else:
-            logger.warning(
-                f"genes.txt missing and training data not an .h5ad file (or not found): {data_path}. "
-                f"Could not auto-generate genes.txt."
-            )
-    except Exception as ge:
-        logger.warning(f"Could not write genes.txt to {model_dir}: {ge}")
+    if not (isinstance(data_path, str) and data_path.lower().endswith(".h5ad") and os.path.isfile(data_path)):
+        raise RuntimeError(
+            "genes.txt missing and training data is not a readable .h5ad file. "
+            "Provide a valid processed.h5ad."
+        )
+
+    adata = read_h5ad(data_path)
+    genes = list(map(str, adata.var_names.tolist()))
+    if not genes:
+        raise RuntimeError("No genes found in adata.var_names; cannot write genes.txt.")
+    _write_index_list_as_tsv(genes, genes_path)
+    logger.warning(f"Wrote genes.txt to {model_dir}")
+
+
+def _ensure_celltypes_file(model_dir: str, data_path: str):
+    """
+    Ensure <model_dir>/celltypes.txt exists.
+    STRICT version: requires adata.uns['cell_types'] to be present and non-empty.
+    Writes a TSV with cell types as the *index* column (no header).
+    """
+    path = os.path.join(model_dir, "celltypes.txt")
+    if os.path.isfile(path):
+        return
+
+    if not (isinstance(data_path, str) and data_path.lower().endswith(".h5ad") and os.path.isfile(data_path)):
+        raise RuntimeError(
+            "celltypes.txt missing and training data is not a readable .h5ad file. "
+            "Provide a valid processed.h5ad with uns['cell_types']."
+        )
+
+    adata = read_h5ad(data_path)
+    labels = adata.uns.get("cell_types")
+    if not isinstance(labels, (list, tuple)) or len(labels) == 0:
+        raise RuntimeError(
+            "processed.h5ad must contain uns['cell_types'] as a non-empty list "
+            "to generate celltypes.txt."
+        )
+
+    _write_index_list_as_tsv([str(x) for x in labels], path)
+    logger.warning(f"Wrote celltypes.txt (from .uns['cell_types']) to {model_dir}")
+
+
+def _post_train_ensure_metadata(model_dir: str, data_path: str):
+    """Ensure required sidecar files exist next to each model directory."""
+    _ensure_genes_file(model_dir, data_path)
+    _ensure_celltypes_file(model_dir, data_path)
 
 
 def _train_with_keras3_fix(cdn: Scaden, data_path, train_datasets):
     """
     Run cdn.train(); if Keras 3 refuses to save to a bare directory
     ('Invalid filepath extension for saving'), save a `.keras` file inside the directory
-    and also ensure that genes.txt exists there.
+    and also ensure that genes.txt and celltypes.txt exist there.
     """
     try:
         cdn.train(input_path=data_path, train_datasets=train_datasets)
-        # If Scaden's internal save finished normally, genes.txt should already exist.
-        # As a safety net, ensure it's there.
-        _ensure_genes_file(cdn.model_dir, data_path)
+        # If Scaden's internal save finished normally, sidecar files should exist.
+        # As a safety net, ensure they're there (and fail loudly if prerequisites missing).
+        _post_train_ensure_metadata(cdn.model_dir, data_path)
     except ValueError as e:
         msg = str(e)
         if "Invalid filepath extension for saving" in msg:
@@ -75,10 +119,10 @@ def _train_with_keras3_fix(cdn: Scaden, data_path, train_datasets):
             os.makedirs(model_dir, exist_ok=True)
             outfile = os.path.join(model_dir, "model.keras")
             cdn.model.save(outfile)
-            logger.warning(f"Scaden model saved to {outfile}")
+            logger.warning(f"Keras 3 workaround: saved model to {outfile}")
 
-            # Make sure genes.txt exists (derived from training data)
-            _ensure_genes_file(model_dir, data_path)
+            # Ensure sidecar files (will raise if uns['cell_types'] or genes missing)
+            _post_train_ensure_metadata(model_dir, data_path)
         else:
             raise
 
@@ -87,7 +131,7 @@ def training(
     data_path, train_datasets, model_dir, batch_size, learning_rate, num_steps, seed=0
 ):
     """
-    Perform training of three a scaden model ensemble consisting of three different models
+    Perform training of a scaden model ensemble consisting of three different models
     :param model_dir:
     :param batch_size:
     :param learning_rate:
